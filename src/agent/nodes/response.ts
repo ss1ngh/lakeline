@@ -1,11 +1,6 @@
-import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, BaseMessage } from "@langchain/core/messages";
 import { AgentState } from "../state";
-
-const llm = new ChatOpenAI({
-  model: "gpt-4o-mini",
-  temperature: 0.2,
-});
+import { llm } from "../../lib/llm";
 
 export async function responseNode(
   state: AgentState

@@ -1,11 +1,6 @@
-import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { AgentState } from "../state";
-
-const llm = new ChatOpenAI({
-  model: "gpt-4o-mini",
-  temperature: 0.2,
-});
+import { llm } from "../../lib/llm";
 
 const SYSTEM_PROMPT = `You are a debt collection agent. Analyze the borrower's message and classify:
 - Intent: PAY_FULL (agree to pay), PAY_PARTIAL (wants to pay less), REFUSE (won't pay), DELAY (needs time), or UNKNOWN

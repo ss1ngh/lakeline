@@ -1,11 +1,6 @@
-import { ChatOpenAI } from "@langchain/openai";
-import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messages";
+import { SystemMessage, BaseMessage } from "@langchain/core/messages";
 import { AgentState } from "../state";
-
-const llm = new ChatOpenAI({
-  model: "gpt-4o-mini",
-  temperature: 0.3,
-});
+import { llm } from "../../lib/llm";
 
 export async function fallbackNode(
   state: AgentState
