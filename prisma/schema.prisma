@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Borrower {
+  id            String    @id @default(uuid())
+  name          String
+  phone         String    @unique
+  totalDebt     Float
+  minimumAccept Float
+  status        String    @default("PENDING")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  messages      ConversationMessage[]
+  agentState    AgentState?
+}
+
+model ConversationMessage {
+  id          String   @id @default(uuid())
+  borrowerId  String
+  role        String   // USER | AGENT | SYSTEM
+  content     String
+  createdAt   DateTime @default(now())
+  borrower    Borrower @relation(fields: [borrowerId], references: [id], onDelete: Cascade)
+
+  @@index([borrowerId])
+  @@index([createdAt])
+}
+
+// Agent processing log (idempotency + failure recovery)
+model ProcessedMessage {
+  id            String   @id
+  borrowerId    String
+  status        String   @default("PROCESSING") // PROCESSING | DONE | FAILED
+  content       String?
+  systemMessage String?
+  createdAt     DateTime @default(now())
+
+  @@unique([id])
+  @@index([borrowerId])
+  @@index([status])
+}
+
+model AgentState {
+  id                String   @id @default(uuid())
+  borrowerId        String   @unique
+  borrower          Borrower @relation(fields: [borrowerId], references: [id], onDelete: Cascade)
+
+  intent            String   @default("UNKNOWN")
+  sentiment        String   @default("NEUTRAL")
+  strategy         String   @default("")
+
+  iterationCount   Int      @default(0)
+  lastAction       String?  // OFFER_SENT | WAITING_RESPONSE | RESOLVED
+
+  nextActionAt     DateTime?
+
+  negotiationData  Json     @default("{}")
+  // { offers: number[], lastOffer: number, rejectionCount: number, accepted: boolean }
+
+  retryData        Json     @default("{}")
+  // { classify: number, tool: number }
+
+  updatedAt         DateTime @updatedAt
+}
