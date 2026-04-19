@@ -55,6 +55,7 @@ export async function loadState(borrowerId: string) {
       lastOffer: negotiationData.lastOffer as number | undefined,
       accepted: negotiationData.accepted as boolean | undefined,
       rejected: negotiationData.rejected as boolean | undefined,
+      rejectionCount: (negotiationData.rejectionCount as number) || 0,
     },
 
     retryCount: {
@@ -73,6 +74,7 @@ export async function saveState(borrowerId: string, state: any): Promise<void> {
     lastOffer: state.negotiationHistory?.lastOffer,
     accepted: state.negotiationHistory?.accepted,
     rejected: state.negotiationHistory?.rejected,
+    rejectionCount: state.negotiationHistory?.rejectionCount || 0,
   };
 
   const retryData = {

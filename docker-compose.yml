@@ -1,6 +1,20 @@
 version: '3.8'
 
+# Docker Compose for Lakeline Local Development
+# 
+# Usage:
+#   docker compose up -d        # Start all services
+#   docker compose down        # Stop all services
+#   docker compose logs -f     # View logs
+#   docker compose down -v    # Stop and remove volumes (data loss!)
+
 services:
+  # PostgreSQL Database
+  # -------------------
+  # Port: 5432 (localhost:5432)
+  # Credentials: postgres / postgres
+  # Database: lakeline
+  # Persistence: postgres_data volume
   postgres:
     image: postgres:16
     container_name: lakeline-db
@@ -12,6 +26,31 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
+  # Redis Queue
+  # -----------
+  # Port: 6379 (localhost:6379)
+  # Persistence: appendonly mode enabled
+  redis:
+    image: redis:7
+    container_name: lakeline-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+# Named volumes for data persistence
 volumes:
   postgres_data:
+  redis_data:

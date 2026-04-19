@@ -5,7 +5,7 @@ import crypto from "crypto";
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "localhost",
   port: parseInt(process.env.REDIS_PORT || "6379"),
-  maxRetriesPerRequest: 3,
+  maxRetriesPerRequest: null,
 });
 
 const LOCK_TTL_MS = 30000;
@@ -111,13 +111,14 @@ const JOB_OPTIONS = {
 
 export async function enqueueMessage(
   borrowerId: string,
-  content: string
+  content?: string,
+  systemMessage?: string
 ): Promise<string> {
   const messageId = `msg-${borrowerId}-${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
   await agentQueue.add(
     "process-message",
-    { borrowerId, messageId, content } as StandardJobPayload,
+    { borrowerId, messageId, content, systemMessage } as StandardJobPayload,
     { jobId: messageId, ...JOB_OPTIONS }
   );
 

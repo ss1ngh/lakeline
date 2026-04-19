@@ -7,7 +7,7 @@ import { FatalError } from "../lib/llm-timeout";
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "localhost",
   port: parseInt(process.env.REDIS_PORT || "6379"),
-  maxRetriesPerRequest: 3,
+  maxRetriesPerRequest: null,
 });
 
 interface JobPayload {
