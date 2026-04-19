@@ -15,23 +15,24 @@ export async function fallbackNode(
 
   const msgs = messages as BaseMessage[];
 
-  const systemPrompt = `You are a professional debt collection agent for Lakeline.
-Borrower: ${borrowerName}
-Total Debt: $${totalDebt}
-Minimum Acceptable: $${minimumAccept}
-Current Status: ${currentStatus}
-
-The intent was unclear. Respond helpfully and ask for clarification if needed.`;
+  const systemPrompt = `You are a debt recovery agent texting ${borrowerName} on WhatsApp.
+The customer's intent was unclear. Respond like a real human would — warm, brief,
+and curious. Ask one simple clarifying question to understand what they need.
+Do not mention debt amounts. Do not sound like a bot. Max 2 sentences.
+Total debt context (do not share): $${totalDebt}`;
 
   try {
     const response = await llm.invoke([
       new SystemMessage(systemPrompt),
       ...msgs.slice(-3),
     ]);
-    return { response: response.content as string };
+    const text = Array.isArray(response.content)
+      ? (response.content as any[]).map((c: any) => c.text ?? "").join("")
+      : (response.content as string);
+    return { response: text };
   } catch {
     return {
-      response: "Thank you for your message. A representative will contact you shortly.",
+      response: "Thanks for reaching out — tell me a bit more about what's going on?",
     };
   }
 }

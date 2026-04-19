@@ -1,102 +1,149 @@
+import { prisma } from "../../lib/prisma";
+import { calculateInstallmentPlan } from "../../lib/financial";
 import { AgentState } from "../state";
-import { proposePaymentPlan, updateBorrowerStatus } from "../tools";
+import { proposePaymentPlan, updateBorrowerStatusSchema } from "../tools";
+
+const ALLOWED = new Set(["propose_payment_plan", "update_borrower_status"]);
 
 export async function toolNode(
-  state: AgentState
+  state: AgentState,
 ): Promise<Partial<AgentState>> {
-  const { strategy, constraintResult, negotiationHistory } = state;
+  const raw = state.toolResults?.[0] as
+    | {
+        name?: string;
+        args?: Record<string, unknown>;
+      }
+    | undefined;
 
-  const constraint = constraintResult as Record<string, unknown>;
-  const amount = constraint?.amount as number;
-  const history = negotiationHistory || { offers: [], lastOffer: undefined };
-
-  const toolResults: unknown[] = [];
-  let lastToolSuccess = true;
-  let lastAction: AgentState["lastAction"] = null;
-
-  if (strategy === "ACCEPT_FULL") {
-    const result = await proposePaymentPlan.invoke({
-      amount: amount || 0,
-      reason: "Borrower agreed to pay full amount",
-    });
-    toolResults.push(result);
-
-    const valid = (result as Record<string, unknown>)?.valid === true;
-    lastToolSuccess = valid;
-
+  if (!raw?.name) {
     return {
-      toolResults,
-      lastToolSuccess,
-      lastAction: "RESOLVED",
-      negotiationHistory: {
-        ...history,
-        offers: amount ? [...history.offers, amount] : history.offers,
-        lastOffer: amount,
-      },
+      lastToolSuccess: true,
+      lastAction: "WAITING_RESPONSE",
     };
   }
 
-  if (strategy === "NEGOTIATE_INITIAL" || strategy === "NEGOTIATE_COUNTER") {
-    if (!amount) {
+  if (!ALLOWED.has(raw.name)) {
+    return {
+      lastToolSuccess: false,
+      toolResults: [],
+      lastAction: "WAITING_RESPONSE",
+    };
+  }
+
+  if (raw.name === "propose_payment_plan") {
+    const amount = Number(raw.args?.amount);
+    const reason =
+      typeof raw.args?.reason === "string"
+        ? raw.args.reason
+        : "Agreed payment plan";
+    const planType =
+      (raw.args?.plan_type as "INSTALLMENT" | "LUMP_SUM" | undefined) ??
+      (state.negotiationMode === "INSTALLMENT" ? "INSTALLMENT" : "LUMP_SUM");
+
+    if (!Number.isFinite(amount) || amount <= 0) {
       return {
-        toolResults: [{ valid: false, error: "No amount in constraint" }],
         lastToolSuccess: false,
+        toolResults: [{ error: "invalid_amount" }],
         lastAction: "WAITING_RESPONSE",
       };
     }
 
-    const result = await proposePaymentPlan.invoke({
-      amount,
-      reason: "Settlement offer extended to borrower",
-    });
-    toolResults.push(result);
-
-    const valid = (result as Record<string, unknown>)?.valid === true;
-    lastToolSuccess = valid;
-
-    if (valid) {
-      lastAction = "OFFER_SENT";
+    if (amount > state.totalDebt * 3) {
+      return {
+        lastToolSuccess: false,
+        toolResults: [{ error: "amount_out_of_range" }],
+        lastAction: "WAITING_RESPONSE",
+      };
     }
 
+    if (planType === "LUMP_SUM" && amount < state.minimumAccept) {
+      return {
+        lastToolSuccess: false,
+        toolResults: [
+          {
+            valid: false,
+            reason: `Lump offer below minimum acceptable ($${state.minimumAccept}).`,
+          },
+        ],
+        lastAction: "WAITING_RESPONSE",
+      };
+    }
+
+    if (planType === "INSTALLMENT") {
+      const { feasible, monthsNeeded } = calculateInstallmentPlan(
+        state.totalDebt,
+        amount,
+        { maxMonths: 120 },
+      );
+      if (!feasible || monthsNeeded > 120) {
+        return {
+          lastToolSuccess: false,
+          toolResults: [
+            {
+              valid: false,
+              reason: "Installment horizon too long under policy.",
+            },
+          ],
+          lastAction: "WAITING_RESPONSE",
+        };
+      }
+    }
+
+    const result = await proposePaymentPlan.invoke({
+      amount,
+      reason,
+      plan_type: planType,
+    });
+
+    const nextOffers = [...state.negotiationHistory.offers, amount];
+
     return {
-      toolResults,
-      lastToolSuccess,
-      lastAction,
+      toolResults: [result],
+      lastToolSuccess: true,
+      lastAction: "RESOLVED",
       negotiationHistory: {
-        ...history,
-        offers: [...history.offers, amount],
+        ...state.negotiationHistory,
+        offers: nextOffers,
         lastOffer: amount,
+        accepted: true,
       },
+      isResolved: true,
     };
   }
 
-  if (strategy === "ESCALATE") {
-    const result = await updateBorrowerStatus.invoke({
-      status: "DEFAULT_RISK",
-      reasonText: "Escalating to collections team",
-    });
-    toolResults.push(result);
-    lastToolSuccess = true;
+  if (raw.name === "update_borrower_status") {
+    const parsed = updateBorrowerStatusSchema.safeParse(raw.args ?? {});
+    if (!parsed.success) {
+      return {
+        lastToolSuccess: false,
+        toolResults: [{ error: "invalid_status_payload" }],
+        lastAction: "WAITING_RESPONSE",
+      };
+    }
 
-    return { toolResults, lastToolSuccess, lastAction: "RESOLVED" };
-  }
+    const { status, reasonText } = parsed.data;
 
-  if (strategy === "FOLLOW_UP") {
-    const nextActionAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const result = await updateBorrowerStatus.invoke({
-      status: "PENDING",
-      reasonText: "Scheduled follow-up",
+    await prisma.borrower.update({
+      where: { id: state.borrowerId },
+      data: { status },
     });
-    toolResults.push(result);
-    lastToolSuccess = true;
 
     return {
-      toolResults,
-      lastToolSuccess,
+      toolResults: [
+        {
+          success: true,
+          status,
+          message: `Status updated to ${status}. Reason: ${reasonText}`,
+        },
+      ],
+      lastToolSuccess: true,
       lastAction: "WAITING_RESPONSE",
-      nextActionAt,
+      currentStatus: status,
     };
   }
 
-  return { toolResults, lastToolSuccess, lastAction: "WAITING_RESPONSE" };
+  return {
+    lastToolSuccess: true,
+    lastAction: "WAITING_RESPONSE",
+  };
 }

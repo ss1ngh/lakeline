@@ -1,54 +1,29 @@
 import { AgentState } from "../state";
 
-export type Strategy =
-  | "ACCEPT_FULL"
-  | "NEGOTIATE_INITIAL"
-  | "NEGOTIATE_COUNTER"
-  | "ESCALATE"
-  | "FOLLOW_UP"
-  | "LLM_FALLBACK";
-
 export function strategyNode(state: AgentState): Partial<AgentState> {
-  const intent = state.intent || "UNKNOWN";
-  const negotiationHistory = state.negotiationHistory || { 
-    offers: [], 
-    lastOffer: undefined,
-    rejected: false 
-  };
-  const totalDebt = (state.totalDebt as number) || 0;
+  const intent = state.intent;
+  const amount = state.borrowerProposedAmount;
+  const anchor = state.borrowerAnchorCount;
+  const debt = state.totalDebt as number;
 
-  const offers = negotiationHistory.offers || [];
-  const lastOffer = negotiationHistory.lastOffer;
-  const hasRejection = negotiationHistory.rejected === true;
-  
-  const rejectionCount = (negotiationHistory as Record<string, unknown>)?.rejectionCount as number || 0;
+  if (amount) {
+    const minMonthly = Math.max(200, Math.round(debt / 60));
+    const ratio = amount / minMonthly;
 
-  const tooManyRejections = rejectionCount >= 2;
-  const nearFullAmount = lastOffer ? lastOffer >= 0.9 * totalDebt : false;
-
-  let strategy: Strategy;
-
-  if (intent === "PAY_FULL") {
-    strategy = "ACCEPT_FULL";
-  } else if (intent === "REFUSE" || tooManyRejections) {
-    strategy = "ESCALATE";
-  } else if (intent === "DELAY") {
-    strategy = "FOLLOW_UP";
-  } else if (intent === "PAY_PARTIAL") {
-    if (nearFullAmount) {
-      strategy = "ESCALATE";
-    } else if (offers.length === 0) {
-      strategy = "NEGOTIATE_INITIAL";
-    } else if (hasRejection) {
-      strategy = "NEGOTIATE_COUNTER";
-    } else {
-      strategy = "NEGOTIATE_INITIAL";
+    if (anchor >= 2) {
+      if (ratio >= 0.7) return { strategy: "ACCEPT_INSTALLMENT" };
+      return { strategy: "ESCALATE" };
     }
-  } else {
-    strategy = "LLM_FALLBACK";
+
+    if (ratio >= 0.75) return { strategy: "ACCEPT_INSTALLMENT" };
+    if (ratio < 0.3) return { strategy: "ESCALATE" };
+
+    return { strategy: "NEGOTIATE_INSTALLMENT" };
   }
 
-  return {
-    strategy,
-  };
+  if (intent === "PAY_FULL") return { strategy: "ACCEPT_FULL" };
+  if (intent === "DELAY") return { strategy: "FOLLOW_UP" };
+  if (intent === "REFUSE") return { strategy: "EMPATHIZE" };
+
+  return { strategy: "EMPATHIZE" };
 }

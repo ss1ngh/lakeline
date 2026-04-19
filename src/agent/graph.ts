@@ -1,15 +1,35 @@
 import { prisma } from "../lib/prisma";
+import {
+  HumanMessage,
+  AIMessage,
+  SystemMessage,
+  BaseMessage,
+} from "@langchain/core/messages";
+
 import { classifyIntentNode } from "./nodes/classify";
-import { strategyNode } from "./nodes/strategy";
-import { constraintNode } from "./nodes/constraint";
+import { reasoningNode } from "./nodes/reasoning";
 import { toolNode } from "./nodes/tools";
-import { responseNode } from "./nodes/response";
-import { fallbackNode } from "./nodes/fallback";
 import { evaluationNode } from "./nodes/evaluation";
-import { terminationNode } from "./nodes/termination";
+import { greetingNode } from "./nodes/greeting";
+
 import { scheduleFollowUp } from "../lib/queue";
-import { withTimeout, LLMTimeoutError, RetryableError, FatalError } from "../lib/llm-timeout";
-import { shouldSkipLLM, recordLLMFailure, recordLLMSuccess } from "../lib/circuit-breaker";
+
+import {
+  withTimeout,
+  LLMTimeoutError,
+  RetryableError,
+} from "../lib/llm-timeout";
+
+import {
+  shouldSkipLLM,
+  recordLLMFailure,
+  recordLLMSuccess,
+  resetCircuitBreaker,
+} from "../lib/circuit-breaker";
+
+/* -------------------------------------------------------------------------- */
+/* TYPES */
+/* -------------------------------------------------------------------------- */
 
 interface JobPayload {
   borrowerId: string;
@@ -18,23 +38,24 @@ interface JobPayload {
   systemMessage?: string;
 }
 
-interface AgentStateType {
-  messages: Array<{ role: string; content: string }>;
+type LastAction = "WAITING_RESPONSE" | "RESOLVED" | "OFFER_SENT" | null;
+
+interface AgentState {
+  messages: BaseMessage[];
+
   borrowerId: string;
   borrowerName: string;
   totalDebt: number;
   minimumAccept: number;
   currentStatus: string;
-  intent: string;
-  sentiment: string;
+
   strategy: string;
-  constraintResult: Record<string, unknown>;
-  toolResults: unknown[];
   response: string;
-  iterationCount: number;
-  maxIterations: number;
-  isResolved: boolean;
-  lastToolSuccess: boolean;
+
+  borrowerProposedAmount?: number;
+  borrowerAnchorCount: number;
+  lastBorrowerAmount?: number;
+
   negotiationHistory: {
     offers: number[];
     lastOffer?: number;
@@ -42,137 +63,133 @@ interface AgentStateType {
     rejected?: boolean;
     rejectionCount: number;
   };
-  retryCount: {
-    classify: number;
-    tool: number;
-  };
+
+  toolResults: any[];
+  lastToolSuccess: boolean;
+
+  isResolved: boolean;
+  lastAction: LastAction;
   nextActionAt?: Date;
-  lastAction: string | null;
 }
 
-interface Phase1Result {
-  duplicate: boolean;
-  borrower?: {
-    id: string;
-    name: string;
-    totalDebt: number;
-    minimumAccept: number;
-    status: string;
-  };
-  state?: {
-    intent: string;
-    sentiment: string;
-    strategy: string;
-    iterationCount: number;
-    lastAction: string | null;
-    nextActionAt: Date | null;
-    negotiationData: Record<string, unknown>;
-    retryData: Record<string, unknown>;
-  };
-  messages?: Array<{ role: string; content: string }>;
-}
+/* -------------------------------------------------------------------------- */
+/* LOGGING */
+/* -------------------------------------------------------------------------- */
 
 function log(event: string, data: Record<string, unknown>) {
-  console.log(JSON.stringify({ event, ...data, timestamp: new Date().toISOString() }));
+  console.log(
+    JSON.stringify({ event, ...data, timestamp: new Date().toISOString() }),
+  );
 }
 
+/* -------------------------------------------------------------------------- */
+/* STATE BUILDER */
+/* -------------------------------------------------------------------------- */
+
 function buildState(
-  borrower: { id: string; name: string; totalDebt: number; minimumAccept: number; status: string },
-  dbState: { intent: string; sentiment: string; strategy: string; iterationCount: number; lastAction: string | null; nextActionAt: Date | null; negotiationData: Record<string, unknown>; retryData: Record<string, unknown> } | null | undefined,
-  messages: Array<{ role: string; content: string }>
-): AgentStateType {
-  const negotiationData = (dbState?.negotiationData || {}) as Record<string, unknown>;
-  const retryData = (dbState?.retryData || {}) as Record<string, unknown>;
+  borrower: any,
+  messages: Array<{ role: string; content: string }>,
+): AgentState {
+  const langMessages: BaseMessage[] = messages.map((m) => {
+    if (m.role === "USER") return new HumanMessage(m.content);
+    if (m.role === "AGENT") return new AIMessage(m.content);
+    return new SystemMessage(m.content);
+  });
 
   return {
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    messages: langMessages,
+
     borrowerId: borrower.id,
     borrowerName: borrower.name,
     totalDebt: borrower.totalDebt,
     minimumAccept: borrower.minimumAccept,
     currentStatus: borrower.status,
-    intent: dbState?.intent || "UNKNOWN",
-    sentiment: dbState?.sentiment || "NEUTRAL",
-    strategy: dbState?.strategy || "",
-    constraintResult: {},
-    toolResults: [],
+
+    strategy: "",
     response: "",
-    iterationCount: dbState?.iterationCount || 0,
-    maxIterations: 3,
-    isResolved: false,
-    lastToolSuccess: true,
+
+    borrowerProposedAmount: undefined,
+    borrowerAnchorCount: 0,
+    lastBorrowerAmount: undefined,
+
     negotiationHistory: {
-      offers: (negotiationData.offers as number[]) || [],
-      lastOffer: negotiationData.lastOffer as number | undefined,
-      accepted: negotiationData.accepted as boolean | undefined,
-      rejected: negotiationData.rejected as boolean | undefined,
-      rejectionCount: (negotiationData.rejectionCount as number) || 0,
+      offers: [],
+      lastOffer: undefined,
+      accepted: false,
+      rejected: false,
+      rejectionCount: 0,
     },
-    retryCount: {
-      classify: (retryData.classify as number) || 0,
-      tool: (retryData.tool as number) || 0,
-    },
-    nextActionAt: dbState?.nextActionAt || undefined,
-    lastAction: dbState?.lastAction || null,
+
+    toolResults: [],
+    lastToolSuccess: true,
+
+    isResolved: false,
+    lastAction: null,
+    nextActionAt: undefined,
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* STATE NORMALIZER */
+/* -------------------------------------------------------------------------- */
+
+function normalizeState(state: AgentState): AgentState {
+  // Prevent legacy leakage
+  if (state.lastAction === "OFFER_SENT") {
+    state.lastAction = "WAITING_RESPONSE";
+  }
+
+  return state;
+}
+
+/* -------------------------------------------------------------------------- */
+/* SAVE */
+/* -------------------------------------------------------------------------- */
 
 async function savePhase3(
   borrowerId: string,
   messageId: string,
-  state: AgentStateType,
-  response: string
-): Promise<boolean> {
-  let committed = false;
+  response: string,
+) {
   await prisma.$transaction(async (tx) => {
-    await tx.agentState.upsert({
-      where: { borrowerId },
-      update: {
-        intent: state.intent,
-        sentiment: state.sentiment,
-        strategy: state.strategy,
-        iterationCount: state.iterationCount,
-        lastAction: state.lastAction,
-        nextActionAt: state.nextActionAt ?? null,
-        negotiationData: state.negotiationHistory,
-      },
-      create: {
-        borrowerId,
-        intent: state.intent,
-        sentiment: state.sentiment,
-        strategy: state.strategy,
-        iterationCount: state.iterationCount,
-        lastAction: state.lastAction,
-        nextActionAt: state.nextActionAt ?? null,
-        negotiationData: state.negotiationHistory,
-      },
-    });
-
     await tx.conversationMessage.create({
-      data: { borrowerId, role: "AGENT", content: response },
+      data: {
+        borrowerId,
+        role: "AGENT",
+        content: response,
+      },
     });
 
     await tx.processedMessage.upsert({
       where: { id: messageId },
       update: { status: "DONE" },
-      create: { id: messageId, borrowerId, status: "DONE" },
+      create: {
+        id: messageId,
+        borrowerId,
+        status: "DONE",
+      },
     });
-    committed = true;
   });
-  return committed;
 }
 
+/* -------------------------------------------------------------------------- */
+/* MAIN */
+/* -------------------------------------------------------------------------- */
+
 export async function runAgent(input: JobPayload): Promise<string> {
-  const startTime = Date.now();
   const { borrowerId, messageId, content, systemMessage } = input;
+  const startTime = Date.now();
 
-  log("agent_start", { borrowerId, messageId, content: content?.substring(0, 50), systemMessage });
-
-  let shouldScheduleFollowUp = false;
+  log("agent_start", {
+    borrowerId,
+    messageId,
+    preview: content?.slice(0, 50),
+  });
 
   try {
-    const phase1Start = Date.now();
-    const phase1 = await prisma.$transaction(async (tx): Promise<Phase1Result> => {
+    /* -------------------------- PHASE 1: DB LOAD -------------------------- */
+
+    const phase1 = await prisma.$transaction(async (tx) => {
       const existing = await tx.processedMessage.findUnique({
         where: { id: messageId },
       });
@@ -183,16 +200,20 @@ export async function runAgent(input: JobPayload): Promise<string> {
 
       await tx.processedMessage.upsert({
         where: { id: messageId },
-        update: { status: "PROCESSING", content: content ?? null, systemMessage: systemMessage ?? null },
-        create: { id: messageId, borrowerId, status: "PROCESSING", content: content ?? null, systemMessage: systemMessage ?? null },
+        update: { status: "PROCESSING" },
+        create: {
+          id: messageId,
+          borrowerId,
+          status: "PROCESSING",
+        },
       });
 
-      if (content || systemMessage) {
+      if (content && systemMessage !== "<INITIATE_OUTBOUND_GREETING>") {
         await tx.conversationMessage.create({
           data: {
             borrowerId,
-            role: systemMessage ? "SYSTEM" : "USER",
-            content: systemMessage || content || "",
+            role: "USER",
+            content,
           },
         });
       }
@@ -201,273 +222,128 @@ export async function runAgent(input: JobPayload): Promise<string> {
         where: { id: borrowerId },
       });
 
-      if (!borrower) {
-        throw new Error("Borrower not found");
-      }
-
-      const dbState = await tx.agentState.findUnique({
-        where: { borrowerId },
-      });
+      if (!borrower) throw new Error("Borrower not found");
 
       const messages = await tx.conversationMessage.findMany({
         where: { borrowerId },
         orderBy: { createdAt: "asc" },
-        take: 10,
+        take: 20,
       });
 
       return {
         duplicate: false,
-        borrower: {
-          id: borrower.id,
-          name: borrower.name,
-          totalDebt: borrower.totalDebt,
-          minimumAccept: borrower.minimumAccept,
-          status: borrower.status,
-        },
-        state: dbState
-          ? {
-              intent: dbState.intent,
-              sentiment: dbState.sentiment,
-              strategy: dbState.strategy,
-              iterationCount: dbState.iterationCount,
-              lastAction: dbState.lastAction,
-              nextActionAt: dbState.nextActionAt,
-              negotiationData: dbState.negotiationData as Record<string, unknown>,
-              retryData: dbState.retryData as Record<string, unknown>,
-            }
-          : undefined,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        borrower,
+        messages,
       };
     });
 
-    log("phase1_time", { duration: Date.now() - phase1Start });
+    if (phase1.duplicate) return "Duplicate ignored";
 
-    if (phase1.duplicate) {
-      log("duplicate", { borrowerId, messageId });
-      return "Duplicate message ignored";
-    }
+    const messagesSafe = phase1.messages ?? [];
 
-    if (!phase1.borrower) {
-      log("error", { borrowerId, error: "Borrower not found" });
-      return "Borrower not found";
-    }
-
-    let state = buildState(
+    let state: AgentState = buildState(
       phase1.borrower,
-      phase1.state,
-      phase1.messages || []
-    ) as any;
+      messagesSafe.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+    );
 
-    if (systemMessage && systemMessage.includes("FOLLOW_UP")) {
-      state.intent = "DELAY";
+    resetCircuitBreaker();
+
+    /* -------------------------- GREETING FLOW -------------------------- */
+
+    if (systemMessage === "<INITIATE_OUTBOUND_GREETING>") {
+      const greeting = await withTimeout(greetingNode(state as any), 8000);
+
+      state = normalizeState({ ...state, ...greeting });
+
+      await savePhase3(borrowerId, messageId, state.response);
+      return state.response;
     }
 
-    const classifyStart = Date.now();
-    if (shouldSkipLLM()) {
-      log("llm_circuit_open", { borrowerId, messageId });
-    } else {
+    /* -------------------------- STEP 1: PARSE -------------------------- */
+
+    if (!shouldSkipLLM()) {
       try {
-        const classifyResult = await withTimeout(classifyIntentNode(state), 10000);
-        state = { ...state, ...classifyResult };
+        const parsed = await withTimeout(
+          classifyIntentNode(state as any),
+          8000,
+        );
+        state = normalizeState({ ...state, ...parsed });
         recordLLMSuccess();
-      } catch (err: any) {
-        if (err instanceof LLMTimeoutError) {
-          recordLLMFailure();
-          log("llm_timeout", { borrowerId, node: "classify" });
-        }
+      } catch (err) {
+        if (err instanceof LLMTimeoutError) recordLLMFailure();
         throw err;
       }
     }
-    log("classify_latency", { duration: Date.now() - classifyStart });
 
-    if (state.lastAction === "OFFER_SENT") {
-      if (state.intent === "PAY_FULL") {
-        state.strategy = "ACCEPT_FULL";
-      } else if (state.intent === "REFUSE" || state.intent === "PAY_PARTIAL") {
-        state.strategy = "NEGOTIATE_COUNTER";
-      } else if (state.intent === "DELAY") {
-        state.strategy = "FOLLOW_UP";
-      }
-    } else {
-      const strategyResult = strategyNode(state);
-      state = { ...state, ...strategyResult };
-    }
+    /* -------------------------- STEP 2: REASON -------------------------- */
 
-    const constraintResult = constraintNode(state);
-    state = { ...state, ...constraintResult };
-
-    if (state.strategy === "FOLLOW_UP") {
-      const nextActionAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      state = {
-        ...state,
-        nextActionAt,
-        lastAction: "WAITING_RESPONSE",
-        isResolved: false,
-      };
-    } else {
-      const toolStart = Date.now();
-      if (shouldSkipLLM()) {
-        log("llm_circuit_open", { borrowerId, node: "tool" });
-      } else {
-        try {
-          const toolResult = await withTimeout(toolNode(state), 15000);
-          state = { ...state, ...toolResult };
-          recordLLMSuccess();
-        } catch (err: any) {
-          if (err instanceof LLMTimeoutError) {
-            recordLLMFailure();
-            log("llm_timeout", { borrowerId, node: "tool" });
-          }
-          throw err;
-        }
-      }
-      log("tool_latency", { duration: Date.now() - toolStart });
-    }
-
-    log("agent_tool_executed", {
-      borrowerId,
-      strategy: state.strategy,
-      lastAction: state.lastAction,
-    });
-
-    let agentResponse = "";
-
-    if (state.lastAction === "OFFER_SENT") {
-      const responseStart = Date.now();
-      if (shouldSkipLLM()) {
-        log("llm_circuit_open", { borrowerId, node: "response" });
-      } else {
-        try {
-          const responseResult = await withTimeout(responseNode(state), 10000);
-          state = { ...state, ...responseResult };
-          recordLLMSuccess();
-        } catch (err: any) {
-          if (err instanceof LLMTimeoutError) {
-            recordLLMFailure();
-            log("llm_timeout", { borrowerId, node: "response" });
-          }
-          throw err;
-        }
-      }
-      log("response_latency", { duration: Date.now() - responseStart });
-      agentResponse = state.response;
-
-      const phase3Start = Date.now();
-      const phase3Committed = await savePhase3(borrowerId, messageId, state, agentResponse);
-      log("phase3_time", { duration: Date.now() - phase3Start });
-
-      if (phase3Committed && state.nextActionAt) {
-        await scheduleFollowUp(borrowerId, state.nextActionAt);
-      }
-
-      log("agent_resolved", { borrowerId, strategy: state.strategy });
-      return agentResponse;
-    }
-
-    const evaluationResult = evaluationNode(state);
-    state = { ...state, ...evaluationResult };
-
-    if (state.isResolved) {
-      if (state.strategy === "LLM_FALLBACK") {
-        if (shouldSkipLLM()) {
-          log("llm_circuit_open", { borrowerId, node: "fallback" });
-        } else {
-          try {
-            const fallbackResult = await withTimeout(fallbackNode(state), 10000);
-            state = { ...state, ...fallbackResult };
-            recordLLMSuccess();
-          } catch (err: any) {
-            if (err instanceof LLMTimeoutError) {
-              recordLLMFailure();
-            }
-            throw err;
-          }
-        }
-      } else if (state.strategy === "FOLLOW_UP") {
-        shouldScheduleFollowUp = true;
-      } else {
-        if (shouldSkipLLM()) {
-          log("llm_circuit_open", { borrowerId, node: "response" });
-        } else {
-          try {
-            const responseResult = await withTimeout(responseNode(state), 10000);
-            state = { ...state, ...responseResult };
-            recordLLMSuccess();
-          } catch (err: any) {
-            if (err instanceof LLMTimeoutError) {
-              recordLLMFailure();
-            }
-            throw err;
-          }
-        }
-      }
-    } else if (state.strategy === "ESCALATE" || state.iterationCount >= 3) {
-      if (shouldSkipLLM()) {
-        log("llm_circuit_open", { borrowerId, node: "termination" });
-      } else {
-        try {
-          const terminationResult = await withTimeout(terminationNode(state), 10000);
-          state = { ...state, ...terminationResult };
-          recordLLMSuccess();
-        } catch (err: any) {
-          if (err instanceof LLMTimeoutError) {
-            recordLLMFailure();
-          }
-          throw err;
-        }
-      }
-    } else if (!state.lastToolSuccess) {
-      const constraintResult2 = constraintNode(state);
-      state = { ...state, ...constraintResult2 };
-      const toolResult2 = await withTimeout(toolNode(state), 15000);
-      state = { ...state, ...toolResult2 };
-    }
-
-    agentResponse = state.response || "Thank you. We'll be in touch.";
-
-    if (agentResponse) {
-      const phase3Start = Date.now();
-      const phase3Committed = await savePhase3(borrowerId, messageId, state, agentResponse);
-      log("phase3_time", { duration: Date.now() - phase3Start });
-
-      if (phase3Committed && shouldScheduleFollowUp && state.nextActionAt) {
-        await scheduleFollowUp(borrowerId, state.nextActionAt);
+    if (!shouldSkipLLM()) {
+      try {
+        const reasoning = await withTimeout(reasoningNode(state as any), 12000);
+        state = normalizeState({ ...state, ...reasoning });
+        recordLLMSuccess();
+      } catch (err) {
+        if (err instanceof LLMTimeoutError) recordLLMFailure();
+        throw err;
       }
     }
+
+    /* -------------------------- STEP 3: TOOL -------------------------- */
+
+    try {
+      const toolResult = await withTimeout(toolNode(state as any), 10000);
+      state = normalizeState({ ...state, ...toolResult });
+    } catch (err) {
+      log("tool_error", { error: String(err) });
+    }
+
+    /* -------------------------- STEP 4: EVAL -------------------------- */
+
+    const evalResult = evaluationNode(state as any);
+    state = normalizeState({ ...state, ...evalResult });
+
+    /* -------------------------- FOLLOW-UP -------------------------- */
+
+    if (!state.isResolved) {
+      state.nextActionAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await scheduleFollowUp(borrowerId, state.nextActionAt);
+    }
+
+    /* -------------------------- FINAL RESPONSE -------------------------- */
+
+    const response =
+      state.response ||
+      `Let’s work out a plan that fits you, ${state.borrowerName}.`;
+
+    await savePhase3(borrowerId, messageId, response);
 
     log("agent_complete", {
       borrowerId,
-      strategy: state.strategy,
       resolved: state.isResolved,
-      total_time: Date.now() - startTime,
+      duration: Date.now() - startTime,
     });
-    return agentResponse;
 
+    return response;
   } catch (error: any) {
-    console.error("[Agent] Error:", error);
+    console.error("[Agent Error]", error);
 
-    const isRetryable = error instanceof RetryableError;
+    const retryable = error instanceof RetryableError;
 
     await prisma.processedMessage.upsert({
       where: { id: messageId },
-      update: { status: isRetryable ? "PROCESSING" : "FAILED" },
-      create: { id: messageId, borrowerId, status: isRetryable ? "PROCESSING" : "FAILED", content: content ?? null, systemMessage: systemMessage ?? null },
+      update: { status: retryable ? "PROCESSING" : "FAILED" },
+      create: {
+        id: messageId,
+        borrowerId,
+        status: retryable ? "PROCESSING" : "FAILED",
+      },
     });
 
-    log("agent_error", {
-      borrowerId,
-      messageId,
-      error: String(error),
-      errorType: error?.constructor?.name || "Error",
-      retryable: isRetryable,
-      total_time: Date.now() - startTime,
-    });
+    if (retryable) throw error;
 
-    if (isRetryable) {
-      log("retry_scheduled", { borrowerId, messageId, errorType: error?.constructor?.name });
-      throw new RetryableError(error.message || "Operation failed - will be retried");
-    }
-
-    return "An error occurred. Please try again.";
+    return "Something went wrong. Please try again.";
   }
 }

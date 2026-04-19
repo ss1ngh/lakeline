@@ -2,8 +2,12 @@ import { z } from "zod";
 import { tool } from "@langchain/core/tools";
 
 export const proposePaymentPlanSchema = z.object({
-  amount: z.number().describe("The proposed payment amount"),
+  amount: z.number().describe("Proposed amount (monthly installment OR lump sum in USD)"),
   reason: z.string().describe("Reason for the offer"),
+  plan_type: z
+    .enum(["INSTALLMENT", "LUMP_SUM"])
+    .optional()
+    .describe("Whether amount is per month or one-time settlement"),
 });
 
 export const updateBorrowerStatusSchema = z.object({
@@ -15,13 +19,16 @@ export const updateBorrowerStatusSchema = z.object({
 
 export const proposePaymentPlan = tool(
   async (input) => {
-    const { amount, reason } = input;
+    const { amount, reason, plan_type } = input;
     const valid = amount > 0;
+    const label =
+      plan_type === "INSTALLMENT" ? "per month" : "settlement";
     return {
       valid,
       amount,
+      plan_type: plan_type ?? null,
       plan: valid
-        ? `Payment plan: Pay $${amount} to settle the debt. ${reason}`
+        ? `Payment plan (${label}): $${amount} USD. ${reason}`
         : "Invalid amount. Please propose a valid amount.",
     };
   },
