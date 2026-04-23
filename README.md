@@ -1,208 +1,258 @@
-# Lakeline - AI Debt Collection Agent
+# Lakeline
 
-An event-driven, production-grade AI agent system for handling debt collection conversations. Built with Node.js, TypeScript, Prisma, BullMQ, and LLM-powered decision making.
+AI-powered debt collection agent that manages conversations with borrowers through an intelligent, multi-step agent graph powered by LangGraph.
 
 ## Overview
 
-Lakeline is an intelligent agent that manages debt collection conversations through a sophisticated pipeline:
+Lakeline is a Next.js application with a dedicated background worker that processes borrower conversations. The system uses a stateful AI agent (built with LangGraph) to:
 
-1. **Receives messages** via BullMQ queue
-2. **Classifies intent** using LLM (pay full, partial, refuse, delay)
-3. **Selects strategy** via FSM (accept, negotiate, escalate, follow-up)
-4. **Generates responses** with negotiation offers
-5. **Executes tools** (payment plans, status updates)
-6. **Persists state** and schedules follow-ups
+- Classify incoming messages (intent detection)
+- Generate context-aware responses using reasoning
+- Execute tools for financial calculations and offers
+- Evaluate and determine next actions
+- Schedule follow-ups for unresolved conversations
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Framework | Next.js 16.2.4 |
+| Language | TypeScript |
+| UI | React 19.2.4 + Tailwind CSS 4 |
+| Database | PostgreSQL + Prisma 7 |
+| Queue/Worker | BullMQ + Redis |
+| AI Agent | LangGraph + LangChain |
+| LLM Providers | Groq (default) or OpenAI |
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────┐     ┌─────────────┐
-│   Queue    │────▶│  Worker  │────▶│   Agent     │
-│  (BullMQ)  │     │  (Node)  │     │  Pipeline   │
-└─────────────┘     └──────────┘     └─────────────┘
-       │                                      │
-       ▼                                      ▼
-┌─────────────┐                      ┌─────────────┐
-│   Redis     │                      │  PostgreSQL │
-│  (Queue)    │                      │   (Prisma)  │
-└─────────────┘                      └─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        Next.js API                               │
+│  ┌──────────────────┐    ┌──────────────────────────────────┐  │
+│  │  Conversations   │    │     Agent Execution API           │  │
+│  │    Dashboard    │    │  (POST /api/conversations/:id/send)│  │
+│  └──────────────────┘    └──────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Redis Queue (BullMQ)                       │
+│                         agent-queue                              │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Background Worker (Node.js)                  │
+│                                                                  │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│   │   Classify  │───▶│  Reasoning │───▶│    Tool    │──┐        │
+│   │    Node    │    │    Node    │    │    Node   │  │        │
+│   └─────────────┘    └─────────────┘    └─────────────┘  │        │
+│                                                          ▼        │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│   │  Greeting  │    │ Evaluation │◀────│  Follow-up │         │
+│   │    Node    │    │    Node    │    │  Schedule │         │
+│   └─────────────┘    └─────────────┘    └─────────────┘         │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      PostgreSQL Database                         │
+│                                                                  │
+│   Borrower  ──▶  ConversationMessage  ──▶  AgentState            │
+│                                                                  │
+│   ProcessedMessage (idempotency + failure recovery)             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Components
+### Agent Graph Flow
 
-| Component | Purpose |
-|-----------|---------|
-| `src/lib/queue.ts` | BullMQ queue setup, job configuration, follow-up scheduling |
-| `src/lib/worker.ts` | Worker processing with lock contention handling |
-| `src/agent/graph.ts` | Main agent pipeline (classify → strategy → tool → response) |
-| `src/agent/nodes/` | Individual pipeline nodes (classify, strategy, constraint, tool, evaluation, response) |
-| `src/lib/prisma.ts` | Prisma client singleton |
-| `src/lib/llm-timeout.ts` | Timeout wrapper + error classification |
-| `src/lib/circuit-breaker.ts` | LLM failure protection |
+1. **Greeting Flow**: Initiates outbound greetings for new borrowers
+2. **Classify Node**: Detects borrower intent (payment, dispute, inquiry, etc.)
+3. **Reasoning Node**: Generates context-aware response strategy
+4. **Tool Node**: Executes financial calculations, offer generation
+5. **Evaluation Node**: Determines if conversation is resolved
+6. **Follow-up Scheduling**: Queues next action for unresolved cases
 
-### Database Models
+### Key Features
 
-- **Borrower** - Customer with debt information
-- **ConversationMessage** - Chat history (USER, AGENT, SYSTEM roles)
-- **ProcessedMessage** - Idempotency tracking
-- **AgentState** - Persisted agent state per borrower
+- **Idempotency**: ProcessedMessage table prevents duplicate processing
+- **Circuit Breaker**: LLM failure protection with auto-retry
+- **Timeout Handling**: Configurable LLM and execution timeouts
+- **Distributed Locking**: Redis-based locks prevent concurrent processing per borrower
+- **Retry Logic**: Automatic retry for transient failures
 
-## Features
+## Folder Structure
 
-### Reliability
-- **Idempotency** - ProcessedMessage prevents duplicate processing
-- **Per-borrower locking** - Redis-based distributed lock prevents race conditions
-- **Ownership-safe heartbeat** - Lock renewal validates ownership before extending TTL
-- **Retry with backoff** - BullMQ configured with 3 attempts, exponential backoff
+```
+lakeline/
+├── prisma/
+│   ├── schema.prisma         # Database schema
+│   └── migrations/          # Prisma migrations
+├── scripts/
+│   ├── reset-db.ts         # Database reset script
+│   ├── seedBorrowers.ts    # Seed test borrowers
+│   └── test-agent.ts      # Test agent with sample input
+├── src/
+│   ├── app/                # Next.js App Router
+│   │   ├── api/
+│   │   │   └── conversations/   # REST API endpoints
+│   │   ├── conversations/  # Conversation dashboard UI
+│   │   ├── globals.css    # Global styles
+│   │   └── layout.tsx     # Root layout
+│   ├── agent/              # AI Agent implementation
+│   │   ├── graph.ts        # LangGraph agent definition
+│   │   ├── state.ts        # Agent state types
+│   │   ├── tools.ts        # Agent tools definitions
+│   │   └── nodes/          # Graph nodes
+│   │       ├── classify.ts
+│   │       ├── greeting.ts
+│   │       ├── reasoning.ts
+│   │       ├── tools.ts
+│   │       └── evaluation.ts
+│   └── lib/                # Shared utilities
+│       ├── prisma.ts       # Prisma client
+│       ├── llm.ts         # LLM client
+│       ├── queue.ts       # Redis queue operations
+│       ├── worker.ts     # BullMQ worker
+│       ├── circuit-breaker.ts
+│       ├── llm-timeout.ts
+│       └── agent-state.ts
+├── package.json
+├── next.config.ts
+├── tsconfig.json
+└── .env.example
+```
 
-### Resilience
-- **LLM timeout handling** - 10-15s timeouts prevent worker hangs
-- **Error classification** - RetryableError vs FatalError for proper retry logic
-- **Circuit breaker** - In-memory breaker prevents cascading LLM failures
-- **Stuck message recovery** - Recovers PROCESSING messages > 5 minutes old
+## Database Schema
 
-### Observability
-- **Structured JSON logging** - All events logged with timestamps
-- **Execution timing** - Phase1, classify, tool, response, phase3 timing
-- **Error logging** - Error type, retryable flag, stack traces
+### Models
 
-## Getting Started
+- **Borrower**: Loan recipient with debt details and status
+- **ConversationMessage**: Chat history between borrower and agent
+- **AgentState**: Persistent state tracking intent, sentiment, strategy, negotiation data
+- **ProcessedMessage**: Idempotency log for message processing
 
-### Prerequisites
+## Prerequisites
 
 - Node.js 18+
-- PostgreSQL
-- Redis
+- PostgreSQL 14+
+- Redis 6+
+- pnpm (or npm/yarn)
 
-### Setup
+## Local Setup
 
-1. **Install dependencies:**
+### 1. Clone and Install Dependencies
+
 ```bash
+git clone <repo>
+cd lakeline
 npm install
 ```
 
-2. **Configure environment:**
+### 2. Configure Environment Variables
+
+Copy `.env.example` to `.env` and update values:
+
 ```bash
 cp .env.example .env
-# Edit .env with your database and Redis credentials
 ```
 
-3. **Run migrations:**
-```bash
-npx prisma migrate dev
+Edit `.env`:
+
+```env
+# Database
+DATABASE_URL="postgresql://user:password@localhost:5432/lakeline"
+
+# LLM Provider
+# Option 1: Groq (recommended - free tier)
+GROQ_API_KEY="your-groq-api-key-here"
+
+# Redis
+REDIS_HOST="localhost"
+REDIS_PORT="6379"
+
+# Worker
+WORKER_CONCURRENCY="10"
 ```
 
-4. **Start the worker:**
+### 3. Set Up Database
+
 ```bash
+# Create the database
+createdb lakeline
+
+# Run migrations
+npx prisma migrate deploy
+
+# Or for development with seed
+npx prisma migrate dev --name init
+```
+
+### 4. Seed Test Data
+
+```bash
+# Seed borrowers with sample data
+npm run seed:borrowers
+```
+
+### 5. Start Development Server
+
+```bash
+# Terminal 1: Next.js dev server
+npm run dev
+
+# Terminal 2: Background worker
 npm run worker
 ```
 
-5. **Start the API (optional):**
-```bash
-npm run dev
-```
+### 6. Verify Setup
 
-### Environment Variables
+- Conversations dashboard: http://localhost:3000/conversations
+- API: http://localhost:3000/api/conversations
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Required |
-| `REDIS_HOST` | Redis host | localhost |
-| `REDIS_PORT` | Redis port | 6379 |
-| `OPENAI_API_KEY` | OpenAI API key for LLM | Required |
-| `WORKER_CONCURRENCY` | Number of concurrent workers | 10 |
+## Available Scripts
 
-## Usage
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start Next.js development server |
+| `npm run build` | Build production application |
+| `npm run start` | Start production server |
+| `npm run lint` | Run ESLint |
+| `npm run worker` | Start background worker |
+| `npm run seed:borrowers` | Seed test borrowers |
+| `npm run test:agent` | Test agent with sample input |
 
-### Enqueue a Message
 
-```typescript
-import { enqueueMessage } from './lib/queue';
+## Environment Variables Reference
 
-const messageId = await enqueueMessage(
-  'borrower-123',
-  'I want to pay but need a payment plan'
-);
-```
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `DATABASE_URL` | PostgreSQL connection string | Yes |
+| `GROQ_API_KEY` | Groq API key (for free LLM) | Yes* |
+| `REDIS_HOST` | Redis host | Yes |
+| `REDIS_PORT` | Redis port | Yes |
+| `WORKER_CONCURRENCY` | Worker concurrency | No (default: 10) |
 
-### Worker Processing Flow
+*Must supply at least one LLM provider API key.
 
-```
-1. Acquire Redis lock (per-borrower)
-2. Phase 1: DB Transaction
-   - Check idempotency (ProcessedMessage)
-   - Store USER/SYSTEM message
-   - Load borrower, state, conversation
-3. Phase 2: Agent Pipeline (NO DB calls)
-   - classifyIntentNode (LLM)
-   - strategyNode (FSM)
-   - constraintNode
-   - toolNode
-   - evaluationNode
-   - responseNode
-4. Phase 3: DB Transaction
-   - Save AgentState
-   - Store AGENT response
-   - Mark DONE
-5. Schedule follow-up (if needed)
-6. Release lock
-```
+## Troubleshooting
 
-## Error Handling
+### Worker not processing jobs
 
-### Retryable Errors
-- LLM timeout (will be retried by BullMQ)
-- Tool execution failure (retried)
+- Ensure Redis is running: `redis-cli ping`
+- Check queue: `GET agent-queue:active`
+- Review worker logs for errors
 
-### Fatal Errors
-- Worker timeout (>30s execution)
-- Database connection failure
-- Invalid borrower ID
+### LLM errors
 
-## Production Considerations
+- Verify API key in `.env`
+- Check circuit breaker status in logs
+- Review timeout settings in `llm-timeout.ts`
 
-For production deployment, consider adding:
+### Database connection
 
-- **Redis-based circuit breaker** - Current is in-memory, won't work across multiple workers
-- **Dead letter queue** - For poison messages that always fail
-- **Monitoring** - Datadog, New Relic, or similar
-- **Distributed locking** - Redlock algorithm for multi-region
-- **Cron job** - Run `recoverStuckMessages()` periodically
-
-## API Reference
-
-### Queue Functions
-
-```typescript
-// Enqueue a new message
-enqueueMessage(borrowerId: string, content: string): Promise<string>
-
-// Schedule a follow-up
-scheduleFollowUp(borrowerId: string, scheduledAt: Date): Promise<void>
-
-// Retry failed queue jobs
-retryFailedMessages(): Promise<number>
-
-// Retry failed DB messages
-retryFailedDBMessages(prisma: PrismaClient): Promise<number>
-
-// Recover stuck PROCESSING messages
-recoverStuckMessages(prisma: PrismaClient, stuckThresholdMs?: number): Promise<number>
-```
-
-### Error Types
-
-```typescript
-// LLM timeout - will be retried
-new LLMTimeoutError("Operation timed out")
-
-// Retryable - will be retried by BullMQ
-new RetryableError("Operation failed")
-
-// Fatal - marked as FAILED, not retried
-new FatalError("Non-retryable error")
-```
-
-## License
-
-MIT
+- Verify `DATABASE_URL` format
+- Ensure PostgreSQL is running
+- Check Prisma connection: `npx prisma studio`

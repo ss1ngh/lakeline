@@ -254,7 +254,7 @@ export async function runAgent(input: JobPayload): Promise<string> {
     /* -------------------------- GREETING FLOW -------------------------- */
 
     if (systemMessage === "<INITIATE_OUTBOUND_GREETING>") {
-      const greeting = await withTimeout(greetingNode(state as any), 8000);
+      const greeting = await withTimeout(greetingNode(state as any), 20000);
 
       state = normalizeState({ ...state, ...greeting });
 
@@ -268,7 +268,7 @@ export async function runAgent(input: JobPayload): Promise<string> {
       try {
         const parsed = await withTimeout(
           classifyIntentNode(state as any),
-          8000,
+          15000,
         );
         state = normalizeState({ ...state, ...parsed });
         recordLLMSuccess();
@@ -282,7 +282,7 @@ export async function runAgent(input: JobPayload): Promise<string> {
 
     if (!shouldSkipLLM()) {
       try {
-        const reasoning = await withTimeout(reasoningNode(state as any), 12000);
+        const reasoning = await withTimeout(reasoningNode(state as any), 25000);
         state = normalizeState({ ...state, ...reasoning });
         recordLLMSuccess();
       } catch (err) {

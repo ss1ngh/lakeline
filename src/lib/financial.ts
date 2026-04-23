@@ -9,7 +9,7 @@ export interface InstallmentPlanResult {
   feasible: boolean;
 }
 
-const DEFAULT_MAX_MONTHS = 120;
+const DEFAULT_MAX_MONTHS = 60;
 
 /**
  * @param totalDebt — principal owed (USD)

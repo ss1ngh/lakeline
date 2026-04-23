@@ -17,8 +17,8 @@ interface JobPayload {
   systemMessage?: string;
 }
 
-const concurrency = parseInt(process.env.WORKER_CONCURRENCY || "10");
-const EXECUTION_TIMEOUT_MS = 30000;
+const concurrency = parseInt(process.env.WORKER_CONCURRENCY || "2");
+const EXECUTION_TIMEOUT_MS = 60000;
 
 async function withExecutionTimeout<T>(
   promise: Promise<T>,

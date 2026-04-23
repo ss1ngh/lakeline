@@ -11,6 +11,7 @@ function getGroqModel(): ChatOpenAI {
     model: "openai/gpt-oss-20b",
     temperature: 0.2,
     apiKey,
+    maxRetries: 0,
     configuration: {
       baseURL: "https://api.groq.com/openai/v1",
     },
