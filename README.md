@@ -100,7 +100,7 @@ The system requires Node.js 18+, PostgreSQL 14+, and Redis 6+. Run the following
 ### 1. Clone & Install
 
 ```bash
-git clone [https://github.com/](https://github.com/)<your-username>/lakeline.git
+git clone https://github.com/ss1ngh/lakeline.git OR git@github.com:ss1ngh/lakeline.git
 cd lakeline
 npm install
 ```
