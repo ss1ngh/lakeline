@@ -1,121 +1,203 @@
 # Lakeline
 
-AI-powered debt collection agent that manages conversations with borrowers through an intelligent, multi-step agent graph powered by LangGraph.
+An AI-powered debt collection agent that autonomously manages borrower conversations. Unlike a standard stateless chatbot, Lakeline operates as a **distributed AI system** using a **stateful, tool-using agent graph** built on LangGraph.
 
-## Overview
+It is designed to:
 
-Lakeline is a Next.js application with a dedicated background worker that processes borrower conversations. The system uses a stateful AI agent (built with LangGraph) to:
+- Understand borrower intent accurately.
+- Plan responses using logical reasoning.
+- Execute specific financial tools (e.g., settlements, payment plans).
+- Maintain persistent conversation state across multiple interactions.
+- Automatically schedule and trigger follow-ups.
 
-- Classify incoming messages (intent detection)
-- Generate context-aware responses using reasoning
-- Execute tools for financial calculations and offers
-- Evaluate and determine next actions
-- Schedule follow-ups for unresolved conversations
+---
 
-## Tech Stack
+### To understand how Lakeline operates, view it as a distributed workflow system separated into distinct layers:
 
-| Component | Technology |
-|-----------|------------|
-| Framework | Next.js 16.2.4 |
-| Language | TypeScript |
-| UI | React 19.2.4 + Tailwind CSS 4 |
-| Database | PostgreSQL + Prisma 7 |
-| Queue/Worker | BullMQ + Redis |
-| AI Agent | LangGraph + LangChain |
-| LLM Providers | Groq (default) or OpenAI |
+- **API (Ingestion):** Receives user input and webhooks.
+- **Queue (Buffer):** Holds pending tasks to ensure no messages are dropped during high traffic.
+- **Worker (Execution Engine):** Consumes queue jobs and runs the LangGraph AI logic in the background.
+- **Database (Memory):** Stores long-term state, chat history, and idempotency keys to prevent duplicate actions.
 
-## Architecture
+---
 
+## 💻 Tech Stack
+
+| Layer          | Technology              |
+| :------------- | :---------------------- |
+| **Framework**  | Next.js                 |
+| **Language**   | TypeScript              |
+| **UI**         | React + Tailwind CSS    |
+| **Database**   | PostgreSQL + Prisma ORM |
+| **Queue**      | BullMQ                  |
+| **Cache**      | Redis                   |
+| **AI Runtime** | LangGraph + LangChain   |
+| **LLM**        | Groq / OpenAI           |
+
+---
+
+## 🏗️ Architecture
+
+```text
+┌──────────────────────────────────────────────┐
+│                Next.js App                   │
+│                                              │
+│   ┌──────────────────────────────────────┐   │
+│   │  API Layer (Conversations)           │   │
+│   │  /api/conversations/:id/send         │   │
+│   └──────────────────────────────────────┘   │
+└──────────────────────────────────────────────┘
+                      │
+                      ▼
+┌──────────────────────────────────────────────┐
+│            Redis Queue (BullMQ)              │
+│                agent-queue                   │
+└──────────────────────────────────────────────┘
+                      │
+                      ▼
+┌──────────────────────────────────────────────┐
+│          Background Worker (Node.js)         │
+│                                              │
+│   ┌──────────────┐   ┌──────────────┐        │
+│   │  Classify    │ → │  Reasoning   │        │
+│   └──────────────┘   └──────────────┘        │
+│            │                 │               │
+│            ▼                 ▼               │
+│      ┌──────────────┐   ┌──────────────┐     │
+│      │    Tools     │ → │  Evaluation  │     │
+│      └──────────────┘   └──────────────┘     │
+│                             │                │
+│                             ▼                │
+│                    Follow-up Scheduler       │
+└──────────────────────────────────────────────┘
+                      │
+                      ▼
+┌──────────────────────────────────────────────┐
+│              PostgreSQL Database             │
+│                                              │
+│  Borrower → Messages → AgentState            │
+│  ProcessedMessage (idempotency layer)        │
+└──────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Next.js API                               │
-│  ┌──────────────────┐    ┌──────────────────────────────────┐  │
-│  │  Conversations   │    │     Agent Execution API           │  │
-│  │    Dashboard    │    │  (POST /api/conversations/:id/send)│  │
-│  └──────────────────┘    └──────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Redis Queue (BullMQ)                       │
-│                         agent-queue                              │
-└─────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Background Worker (Node.js)                  │
-│                                                                  │
-│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│   │   Classify  │───▶│  Reasoning │───▶│    Tool    │──┐        │
-│   │    Node    │    │    Node    │    │    Node   │  │        │
-│   └─────────────┘    └─────────────┘    └─────────────┘  │        │
-│                                                          ▼        │
-│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│   │  Greeting  │    │ Evaluation │◀────│  Follow-up │         │
-│   │    Node    │    │    Node    │    │  Schedule │         │
-│   └─────────────┘    └─────────────┘    └─────────────┘         │
-└─────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      PostgreSQL Database                         │
-│                                                                  │
-│   Borrower  ──▶  ConversationMessage  ──▶  AgentState            │
-│                                                                  │
-│   ProcessedMessage (idempotency + failure recovery)             │
-└─────────────────────────────────────────────────────────────────┘
+
+### Agent Flow
+
+The internal LangGraph agent executes through the following node sequence:
+
+- **Greeting Node:** Initiates the interaction.
+- **Classify Node:** Detects the borrower's intent (e.g., PAY, REFUSE, DELAY).
+- **Reasoning Node:** Evaluates the intent and plans a conversation strategy.
+- **Tool Node:** Executes necessary financial logic or API calls.
+- **Evaluation Node:** Determines if the interaction reached a resolution.
+- **Follow-up Scheduler:** Re-enqueues the interaction into BullMQ if the conversation is unresolved.
+
+---
+
+## 🛠️ Local Setup Guide
+
+The system requires Node.js 18+, PostgreSQL 14+, and Redis 6+. Run the following commands in order to configure your local environment.
+
+### 1. Clone & Install
+
+```bash
+git clone [https://github.com/](https://github.com/)<your-username>/lakeline.git
+cd lakeline
+npm install
 ```
 
-### Agent Graph Flow
+### 2. Copy the example environment file and update it with your local credentials.
 
-1. **Greeting Flow**: Initiates outbound greetings for new borrowers
-2. **Classify Node**: Detects borrower intent (payment, dispute, inquiry, etc.)
-3. **Reasoning Node**: Generates context-aware response strategy
-4. **Tool Node**: Executes financial calculations, offer generation
-5. **Evaluation Node**: Determines if conversation is resolved
-6. **Follow-up Scheduling**: Queues next action for unresolved cases
-
-### Key Features
-
-- **Idempotency**: ProcessedMessage table prevents duplicate processing
-- **Circuit Breaker**: LLM failure protection with auto-retry
-- **Timeout Handling**: Configurable LLM and execution timeouts
-- **Distributed Locking**: Redis-based locks prevent concurrent processing per borrower
-- **Retry Logic**: Automatic retry for transient failures
-
-## Folder Structure
-
+```bash
+cp .env.example .env
 ```
+
+### Edit .env to include:
+
+```bash
+DATABASE_URL="postgresql://user:password@localhost:5432/lakeline"
+REDIS_HOST="localhost"
+REDIS_PORT="6379"
+GROQ_API_KEY="your_api_key_here"
+WORKER_CONCURRENCY="10"
+```
+
+### 3. Ensure PostgreSQL is running, then execute the following sequentially to build the schema, reset the environment, and populate test data.
+
+```bash
+# Create the database (requires PostgreSQL CLI)
+createdb lakeline
+
+# Push schema to the database
+npx prisma migrate dev --name init
+
+# Reset the database to a clean state
+npx tsx scripts/reset-db.ts
+
+# Seed the database with initial borrower data
+npm run seed:borrowers
+```
+
+### 4. Open three separate terminals in the root directory and execute the following:
+
+#### Terminal 1: The Background Worker
+
+This process consumes jobs from Redis and runs the LangGraph agent.
+
+```bash
+npm run worker
+```
+
+#### Terminal 2: The Web App
+
+This starts the Next.js development server to view the UI.
+
+```bash
+npm run dev
+```
+
+#### Terminal 3: Enqueue Jobs (Test Agent)
+
+Use this command to create test conversations, push them to the Redis queue, and trigger the agent's outbound greeting.
+
+```bash
+npm run test:agent -- --limit=5
+```
+
+#### Access the application at: http://localhost:3000/conversations and start chatting as the customer.
+
+## 📂Folder Structure
+
+```bash
 lakeline/
 ├── prisma/
-│   ├── schema.prisma         # Database schema
-│   └── migrations/          # Prisma migrations
+│   ├── schema.prisma
+│   └── migrations/
 ├── scripts/
-│   ├── reset-db.ts         # Database reset script
-│   ├── seedBorrowers.ts    # Seed test borrowers
-│   └── test-agent.ts      # Test agent with sample input
+│   ├── reset-db.ts
+│   ├── seedBorrowers.ts
+│   └── test-agent.ts
 ├── src/
-│   ├── app/                # Next.js App Router
+│   ├── app/
 │   │   ├── api/
-│   │   │   └── conversations/   # REST API endpoints
-│   │   ├── conversations/  # Conversation dashboard UI
-│   │   ├── globals.css    # Global styles
-│   │   └── layout.tsx     # Root layout
-│   ├── agent/              # AI Agent implementation
-│   │   ├── graph.ts        # LangGraph agent definition
-│   │   ├── state.ts        # Agent state types
-│   │   ├── tools.ts        # Agent tools definitions
-│   │   └── nodes/          # Graph nodes
+│   │   │   └── conversations/
+│   │   ├── conversations/
+│   │   ├── globals.css
+│   │   └── layout.tsx
+│   ├── agent/
+│   │   ├── graph.ts
+│   │   ├── state.ts
+│   │   ├── tools.ts
+│   │   └── nodes/
 │   │       ├── classify.ts
 │   │       ├── greeting.ts
 │   │       ├── reasoning.ts
 │   │       ├── tools.ts
 │   │       └── evaluation.ts
-│   └── lib/                # Shared utilities
-│       ├── prisma.ts       # Prisma client
-│       ├── llm.ts         # LLM client
-│       ├── queue.ts       # Redis queue operations
-│       ├── worker.ts     # BullMQ worker
+│   └── lib/
+│       ├── prisma.ts
+│       ├── llm.ts
+│       ├── queue.ts
+│       ├── worker.ts
 │       ├── circuit-breaker.ts
 │       ├── llm-timeout.ts
 │       └── agent-state.ts
@@ -123,136 +205,13 @@ lakeline/
 ├── next.config.ts
 ├── tsconfig.json
 └── .env.example
+
 ```
 
-## Database Schema
+## Future Improvements
 
-### Models
-
-- **Borrower**: Loan recipient with debt details and status
-- **ConversationMessage**: Chat history between borrower and agent
-- **AgentState**: Persistent state tracking intent, sentiment, strategy, negotiation data
-- **ProcessedMessage**: Idempotency log for message processing
-
-## Prerequisites
-
-- Node.js 18+
-- PostgreSQL 14+
-- Redis 6+
-- pnpm (or npm/yarn)
-
-## Local Setup
-
-### 1. Clone and Install Dependencies
-
-```bash
-git clone <repo>
-cd lakeline
-npm install
-```
-
-### 2. Configure Environment Variables
-
-Copy `.env.example` to `.env` and update values:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```env
-# Database
-DATABASE_URL="postgresql://user:password@localhost:5432/lakeline"
-
-# LLM Provider
-# Option 1: Groq (recommended - free tier)
-GROQ_API_KEY="your-groq-api-key-here"
-
-# Redis
-REDIS_HOST="localhost"
-REDIS_PORT="6379"
-
-# Worker
-WORKER_CONCURRENCY="10"
-```
-
-### 3. Set Up Database
-
-```bash
-# Create the database
-createdb lakeline
-
-# Run migrations
-npx prisma migrate deploy
-
-# Or for development with seed
-npx prisma migrate dev --name init
-```
-
-### 4. Seed Test Data
-
-```bash
-# Seed borrowers with sample data
-npm run seed:borrowers
-```
-
-### 5. Start Development Server
-
-```bash
-# Terminal 1: Next.js dev server
-npm run dev
-
-# Terminal 2: Background worker
-npm run worker
-```
-
-### 6. Verify Setup
-
-- Conversations dashboard: http://localhost:3000/conversations
-- API: http://localhost:3000/api/conversations
-
-## Available Scripts
-
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start Next.js development server |
-| `npm run build` | Build production application |
-| `npm run start` | Start production server |
-| `npm run lint` | Run ESLint |
-| `npm run worker` | Start background worker |
-| `npm run seed:borrowers` | Seed test borrowers |
-| `npm run test:agent` | Test agent with sample input |
-
-
-## Environment Variables Reference
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `GROQ_API_KEY` | Groq API key (for free LLM) | Yes* |
-| `REDIS_HOST` | Redis host | Yes |
-| `REDIS_PORT` | Redis port | Yes |
-| `WORKER_CONCURRENCY` | Worker concurrency | No (default: 10) |
-
-*Must supply at least one LLM provider API key.
-
-## Troubleshooting
-
-### Worker not processing jobs
-
-- Ensure Redis is running: `redis-cli ping`
-- Check queue: `GET agent-queue:active`
-- Review worker logs for errors
-
-### LLM errors
-
-- Verify API key in `.env`
-- Check circuit breaker status in logs
-- Review timeout settings in `llm-timeout.ts`
-
-### Database connection
-
-- Verify `DATABASE_URL` format
-- Ensure PostgreSQL is running
-- Check Prisma connection: `npx prisma studio`
+- Multi-channel communication support (SMS, WhatsApp, Email).
+- Direct payment gateway integration for executing settlements.
+- Advanced LLM negotiation strategies utilizing dynamic context windows.
+- Comprehensive operational analytics dashboard.
+- Human escalation routing for edge cases.
